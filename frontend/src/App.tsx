@@ -4,14 +4,12 @@ import { UploadCloud, Activity, Car, RefreshCw, DownloadCloud } from 'lucide-rea
 
 interface PredictionResult {
   filename: string;
-  wear_detection: {
-    status: string;
-    mask_area_percentage: number;
-  };
-  remaining_life: {
-    status: string;
-    remaining_life_km: number;
-  };
+  life_percentage: number;
+  wear_percentage: number;
+  remaining_km: number;
+  status: string;
+  error?: string;
+  code?: string;
 }
 
 function App() {
@@ -68,7 +66,12 @@ function App() {
           'Content-Type': 'multipart/form-data',
         },
       });
-      setResult(response.data);
+      if (response.data.error) {
+        setError(response.data.error);
+        setResult(null);
+      } else {
+        setResult(response.data);
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to connect to the prediction server. Make sure the backend is running.');
       console.error(err);
@@ -84,15 +87,15 @@ function App() {
     setError(null);
   };
 
-  const getWearClass = (percentage: number) => {
-    if (percentage < 15) return 'success';
-    if (percentage < 25) return 'warning';
+  const getLifeClass = (percentage: number) => {
+    if (percentage > 70) return 'success';
+    if (percentage > 30) return 'warning';
     return 'danger';
   };
 
-  const getLifeClass = (km: number) => {
-    if (km > 30000) return 'success';
-    if (km > 15000) return 'warning';
+  const getWearClass = (percentage: number) => {
+    if (percentage < 30) return 'success';
+    if (percentage < 70) return 'warning';
     return 'danger';
   };
 
@@ -101,16 +104,18 @@ function App() {
       <div>
         <h1>Tyre AI Insight</h1>
         <p className="subtitle">Upload a tyre image to predict wear and remaining lifespan.</p>
-        {deferredPrompt && (
-          <button 
-            onClick={handleInstallClick}
-            className="install-button"
-            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: '0 auto 2rem', backgroundColor: '#4ade80', color: '#0f172a' }}
-          >
-            <DownloadCloud size={20} />
-            Install App to Home Screen
-          </button>
-        )}
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', flexWrap: 'wrap', marginBottom: '2rem' }}>
+          {deferredPrompt && (
+            <button 
+              onClick={handleInstallClick}
+              className="install-button"
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', backgroundColor: '#4ade80', color: '#0f172a' }}
+            >
+              <DownloadCloud size={20} />
+              Install App
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="upload-card">
@@ -163,28 +168,32 @@ function App() {
         )}
       </div>
 
-      {result && (
+      {!error && result && (
         <div className="results-grid">
-           <div className={`result-card ${getWearClass(result.wear_detection.mask_area_percentage)}`}>
+           <div className={`result-card ${getWearClass(result.wear_percentage)}`}>
              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span className="result-label">Tear Wear Area</span>
+                <span className="result-label">Tire Wear Level</span>
                 <Activity size={20} style={{ color: '#94a3b8' }} />
              </div>
              <div className="result-value">
-               {result.wear_detection.mask_area_percentage}%
+               {result.wear_percentage}%
              </div>
              <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8' }}>
                Percentage of tyre surface exhibiting wear
              </p>
            </div>
            
-           <div className={`result-card ${getLifeClass(result.remaining_life.remaining_life_km)}`}>
+           <div className={`result-card ${getLifeClass(result.life_percentage)}`}>
              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span className="result-label">Remaining Life</span>
                 <Car size={20} style={{ color: '#94a3b8' }} />
              </div>
              <div className="result-value">
-               {result.remaining_life.remaining_life_km.toLocaleString()} km
+               {result.remaining_km.toLocaleString()} km
+               <div style={{ fontSize: '1rem', opacity: 0.8 }}>({result.life_percentage}%)</div>
+             </div>
+             <div style={{ marginTop: '0.5rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+               Status: {result.status}
              </div>
              <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8' }}>
                Estimated safe driving distance remaining
