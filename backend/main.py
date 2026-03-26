@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import tensorflow as tf
 import numpy as np
 import os
-from utils import preprocess_image, extract_textured_tire, is_tire_present, detect_objects_yolo
+from utils import preprocess_image, is_tire_present, detect_objects_yolo, CBAMLayer, calculate_tire_wear_v2
 
-app = FastAPI(title="Tyre Wear Detection API")
+app = FastAPI(title="Tyre Wear Detection API (V4 - CBAM)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,35 +17,38 @@ app.add_middleware(
 
 # Load Models
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
-unet_path = os.path.join(MODEL_DIR, "unet_tire_wear_v3.h5")
-cnn_path = os.path.join(MODEL_DIR, "cnn_classifier_rgb_v3.keras")
+# The new CBAM model filename
+unet_path = os.path.join(MODEL_DIR, "cbam_unet_tire_v4.keras")
 
 # Global variables for models
 unet = None
-cnn = None
 
 @app.on_event("startup")
 def load_models():
-    global unet, cnn
-    if os.path.exists(unet_path) and os.path.exists(cnn_path):
-        unet = tf.keras.models.load_model(unet_path, compile=False)
-        cnn = tf.keras.models.load_model(cnn_path, compile=False)
-        print("Models loaded successfully.")
+    global unet
+    if os.path.exists(unet_path):
+        # Register CBAMLayer so Keras can load it
+        unet = tf.keras.models.load_model(
+            unet_path, 
+            custom_objects={'CBAMLayer': CBAMLayer},
+            compile=False
+        )
+        print("CBAM-U-Net Model loaded successfully.")
     else:
-        print(f"Warning: Models not found in {MODEL_DIR}. Inference will fail.")
+        print(f"Warning: Model not found at {unet_path}. Inference will fail.")
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    if unet is None or cnn is None:
-        return {"error": "Models not loaded. Ensure .h5 and .keras files are in backend/models/"}
+    if unet is None:
+        return {"error": "Model not loaded. Ensure cbam_unet_tire_v4.keras is in backend/models/"}
 
     contents = await file.read()
     
-    # 0. YOLOv8 Pre-filtering (Reject humans, animals, birds)
+    # 0. YOLOv8 Pre-filtering
     is_filtered, detected = detect_objects_yolo(contents)
     if is_filtered:
         return {
-            "error": f"Invalid image detected: {', '.join(detected)}. Please upload a clear image of a tire.",
+            "error": f"Invalid image detected: {', '.join(detected)}.",
             "code": "FORBIDDEN_OBJECT_DETECTED",
             "status": "Invalid"
         }
@@ -53,43 +56,40 @@ async def predict(file: UploadFile = File(...)):
     # 1. Preprocess and Segment
     input_tensor = preprocess_image(contents)
     mask_pred = unet.predict(input_tensor)
-    print(f"DEBUG: Segmentation complete for {file.filename}")
     
-    # 1.5. Validate Tire Presence (Threshold at 15% of image area)
-    if not is_tire_present(mask_pred, threshold=0.15):
+    # 1.5. Validate Tire Presence (Lowered to 1% for bald tires)
+    if not is_tire_present(mask_pred, threshold=0.01):
         return {
-            "error": "No tire detected in the image.",
+            "error": "The tire appears too worn or no tire was detected.",
             "code": "NO_TIRE_DETECTED",
-            "status": "Invalid"
+            "status": "Critical/Worn"
         }
 
-    # 2. Extract Texture (Image * Mask)
-    textured_input = extract_textured_tire(input_tensor, mask_pred)
+    # 2. Precision Wear Calculation (Edge Density + Groove Analysis)
+    wear_percent = calculate_tire_wear_v2(input_tensor, mask_pred)
+    life_percent = 100 - wear_percent
     
-    # 3. Classify with RGB CNN
-    pred_prob = float(cnn.predict(textured_input)[0][0])
-    
-    life_percent = pred_prob * 100
-    wear_percent = 100 - life_percent
-    
-    # Refined Health Logic for Mobile Users
-    if life_percent < 15:
-        # High likelihood of flat tire or severe damage
-        status = "Flat/Damaged"
+    # 3. Status Logic
+    if life_percent < 20: 
+        status = "Critical/Flat"
         remaining_km = 0
-    elif life_percent < 50:
-        status = "Defective"
-        remaining_km = int(pred_prob * 40000)
+    elif life_percent < 45:
+        status = "Worn Out"
+        remaining_km = int((life_percent/100) * 35000)
+    elif life_percent < 75:
+        status = "Moderate"
+        remaining_km = int((life_percent/100) * 35000)
     else:
-        status = "Good"
-        remaining_km = int(pred_prob * 40000)
+        status = "Good Condition"
+        remaining_km = int((life_percent/100) * 35000)
 
     return {
         "filename": file.filename,
         "life_percentage": round(life_percent, 2),
         "wear_percentage": round(wear_percent, 2),
         "remaining_km": remaining_km,
-        "status": status
+        "status": status,
+        "model_version": "v4_cbam_structural"
     }
 
 @app.get("/")

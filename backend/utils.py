@@ -2,6 +2,82 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import os
+import tensorflow as tf
+from tensorflow.keras import layers, models
+
+# --- CBAM DEFINITION (Required for Model Loading) ---
+class CBAMLayer(layers.Layer):
+    """Convolutional Block Attention Module."""
+    def __init__(self, channels, reduction=8, **kwargs):
+        super(CBAMLayer, self).__init__(**kwargs)
+        self.channels = channels
+        self.reduction = reduction
+        
+        # Channel Attention
+        self.avg_pool = layers.GlobalAveragePooling2D()
+        self.max_pool = layers.GlobalMaxPooling2D()
+        self.mlp = models.Sequential([
+            layers.Dense(channels // reduction, activation='relu', use_bias=False),
+            layers.Dense(channels, use_bias=False)
+        ])
+        self.sigmoid_channel = layers.Activation('sigmoid')
+
+        # Spatial Attention
+        self.conv_spatial = layers.Conv2D(1, kernel_size=7, padding='same', activation='sigmoid')
+
+    def call(self, x):
+        avg_out = self.mlp(self.avg_pool(x))
+        max_out = self.mlp(self.max_pool(x))
+        channel_att = self.sigmoid_channel(avg_out + max_out)
+        channel_att = layers.Reshape((1, 1, self.channels))(channel_att)
+        x = x * channel_att
+
+        avg_out_s = tf.reduce_mean(x, axis=-1, keepdims=True)
+        max_out_s = tf.reduce_max(x, axis=-1, keepdims=True)
+        spatial_att = layers.Concatenate(axis=-1)([avg_out_s, max_out_s])
+        spatial_att = self.conv_spatial(spatial_att)
+        x = x * spatial_att
+        return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"channels": self.channels, "reduction": self.reduction})
+        return config
+
+def calculate_tire_wear_v2(image, mask):
+    """
+    Refined logic based on U-Net feature density + Edge complexity.
+    This trusts the U-Net mask as the primary health indicator.
+    """
+    if len(image.shape) == 4: image = image[0] # remove batch dim
+    if len(mask.shape) == 4: mask = mask[0]
+
+    # 1. Mask Density Analysis
+    mask_area = np.sum(mask > 0.5)
+    total_area = mask.size
+    if total_area == 0: return 100.0
+    mask_density = mask_area / total_area
+    
+    # 2. Structural Edge Complexity
+    gray_img = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray_img, 50, 150)
+    
+    # Only count edges that fall WITHIN the U-Net mask
+    mask_binary = (mask > 0.5).squeeze().astype(np.uint8)
+    if mask_area == 0: return 100.0
+    
+    struct_edges = cv2.bitwise_and(edges, edges, mask=mask_binary)
+    edge_density = np.sum(struct_edges > 0) / (mask_area + 1e-6)
+    
+    # 3. Balanced Health Calculation
+    # Baseline: ~35% mask density, ~12% edge complexity
+    if mask_density < 0.005: 
+        return 100.0 # Truly zero features = 100% worn
+        
+    health_score = (mask_density / 0.35) * 70 + (edge_density / 0.12) * 30
+    health_score = min(max(health_score, 0), 100)
+    
+    return float(100 - health_score)
 
 # Load YOLOv8 model for filtering (Nano version for speed)
 # We use a global variable to avoid reloading for every request
