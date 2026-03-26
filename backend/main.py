@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import tensorflow as tf
 import numpy as np
 import os
-from utils import preprocess_image, extract_textured_tire, is_tire_present
+from utils import preprocess_image, extract_textured_tire, is_tire_present, detect_objects_yolo
 
 app = FastAPI(title="Tyre Wear Detection API")
 
@@ -40,6 +40,15 @@ async def predict(file: UploadFile = File(...)):
         return {"error": "Models not loaded. Ensure .h5 and .keras files are in backend/models/"}
 
     contents = await file.read()
+    
+    # 0. YOLOv8 Pre-filtering (Reject humans, animals, birds)
+    is_filtered, detected = detect_objects_yolo(contents)
+    if is_filtered:
+        return {
+            "error": f"Invalid image detected: {', '.join(detected)}. Please upload a clear image of a tire.",
+            "code": "FORBIDDEN_OBJECT_DETECTED",
+            "status": "Invalid"
+        }
     
     # 1. Preprocess and Segment
     input_tensor = preprocess_image(contents)

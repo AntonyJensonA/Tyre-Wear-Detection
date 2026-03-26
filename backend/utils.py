@@ -1,5 +1,15 @@
 import cv2
 import numpy as np
+from ultralytics import YOLO
+import os
+
+# Load YOLOv8 model for filtering (Nano version for speed)
+# We use a global variable to avoid reloading for every request
+yolo_model = YOLO("yolov8n.pt") 
+
+# Forbidden COCO classes that we want to reject
+# 0: person, 14: bird, 15: cat, 16: dog, 17: horse, 18: sheep, 19: cow, etc.
+FORBIDDEN_CLASSES = [0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
 
 IMG_SIZE = 128
 
@@ -67,3 +77,30 @@ def is_tire_present(mask, threshold=0.01):
     mask_ratio = float(np.sum(binary_mask) / (binary_mask.shape[1] * binary_mask.shape[2]))
     print(f"DEBUG: Mask ratio = {mask_ratio:.4f} (Threshold = {threshold})")
     return mask_ratio >= threshold
+
+def detect_objects_yolo(image_bytes):
+    """
+    Uses YOLOv8 to detect forbidden objects (humans, animals, birds).
+    Returns (is_filtered, detected_objects_list)
+    """
+    # Convert bytes to numpy image
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if img is None:
+        return False, []
+
+    # Run inference
+    results = yolo_model(img, verbose=False)[0]
+    
+    detected_classes = results.boxes.cls.cpu().numpy().astype(int)
+    is_filtered = False
+    detected_names = []
+
+    for cls_id in detected_classes:
+        class_name = yolo_model.names[cls_id]
+        detected_names.append(class_name)
+        if cls_id in FORBIDDEN_CLASSES:
+            is_filtered = True
+            
+    return is_filtered, detected_names
